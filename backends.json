@@ -1,0 +1,138 @@
+{
+  "schema_version": 1,
+  "name": "servstart backend catalog",
+  "description": "Справочник локальных бэкендов инференса LLM для сопоставления найденных бинарников и моделей (GGUF) с тем, что каждый бэкенд в состоянии запустить. Составлено 2026-10 по данным llama.cpp README, llms-explorer.com/tree/on-device-local-llm-runtimes, dev.to local-LLM guide 2026-07 и agnt.gg. Записи llama.cpp и lucebox выверены под эту машину (Strix Halo gfx1151).",
+  "memory": {
+    "unit": "GiB",
+    "note": "Разделы mem_info_vram_* и mem_info_gtt_* читаются из /sys/class/drm/card*/device/. GTT выделяется по требованию и не отнимает ОЗУ, пока не занят."
+  },
+  "backends": [
+    {
+      "id": "llamacpp",
+      "name": "llama.cpp",
+      "description": "C/C++ движок инференса, GGUF-формат. На этой машине — сборка HIP (ROCm), gfx1151.",
+      "provider": "llamacpp",
+      "binaries": ["llama-server", "llama-cli", "llama-bench"],
+      "search_paths": ["~/llama.cpp/build-hip/bin", "~/llama.cpp/build-vk/bin", "~/llama.cpp/build/bin", "~/.local/bin"],
+      "formats": ["gguf"],
+      "exclude_arch": ["deepseek4", "deepseek4-dflash-draft"],
+      "note_arch": "Запускает любой GGUF, кроме нестандартных квантов Lucebox (deepseek4/ROCmFPX).",
+      "health": "/health",
+      "models_route": "/v1/models",
+      "port_default": 8080,
+      "env": {"HIP_VISIBLE_DEVICES": "0", "ROCBLAS_USE_HIPBLASLT": "1"},
+      "argv_template": [
+        "{binary}", "-m", "{model}", "--alias", "{alias}",
+        "--host", "{host}", "--port", "{port}",
+        "-ngl", "{gpu_layers}", "-np", "{n_parallel}",
+        "-fa", "{flash_attention}", "-t", "{threads}",
+        "-ctk", "{kv_cache}", "-ctv", "{kv_cache}",
+        "-c", "{context}", "--jinja", "--metrics",
+        "{mtp_args}", "{mmproj_args}", "{extra_args}"
+      ],
+      "settings": [
+        {"key": "host", "type": "str", "label": "Адрес прослушивания", "what": "Интерфейс, на котором сервер принимает HTTP-запросы", "why": "127.0.0.1 — только с этой машины (безопасно). 0.0.0.0 — для всей локальной сети; тогда модель доступна соседям без пароля.", "default": "127.0.0.1"},
+        {"key": "port", "type": "int", "label": "Порт", "what": "TCP-порт, на котором llama-server публикует OpenAI-совместимый API", "why": "По этому адресу к модели подключаются клиенты (Hermes и др.). Не должен совпадать с портом другого бэкенда.", "default": 8080, "min": 1, "max": 65535},
+        {"key": "context", "type": "int", "label": "Контекст (токенов)", "what": "Максимальная длина окна контекста", "why": "Определяет, сколько текста модель «помнит» за раз. Hermes отказывается работать при окне меньше 64000, поэтому дефолт 65536.", "default": 65536, "min": 2048, "max": 262144, "step": 1024},
+        {"key": "threads", "type": "int", "label": "Потоков CPU", "what": "Число потоков для вычислений на процессоре", "why": "Ставить по числу ФИЗИЧЕСКИХ ядер (на Z13 их 16), а не логических (32) — иначе лишние переключения контекста.", "default": 16, "min": 1, "max": 64},
+        {"key": "kv_cache", "type": "enum", "label": "KV-кэш", "what": "Точность хранения ключей/значений внимания", "why": "q8_0 занимает вдвое меньше памяти, чем f16, почти без потери качества — стандарт для длинного контекста.", "default": "q8_0", "choices": ["q8_0", "q4_0", "f16"]},
+        {"key": "gpu_layers", "type": "int", "label": "Слоёв на GPU", "what": "Сколько слоёв модели выгружать на видеокарту", "why": "999 = все слои (максимальная скорость). Меньше — часть остаётся на CPU: медленнее, но меньше VRAM.", "default": 999, "min": 0, "max": 999},
+        {"key": "flash_attention", "type": "bool", "label": "Flash attention", "what": "Ускоренное ядро вычисления внимания", "why": "Заметно быстрее и экономичнее по памяти. Отключать только для диагностики проблем.", "default": true, "on_value": "on", "off_value": "off"},
+        {"key": "n_parallel", "type": "int", "label": "Параллельных слотов", "what": "Сколько одновременных сессий сервер обслуживает", "why": "Каждый слот делит контекст поровну: 65536/4 = 16384 на слот. Для одного пользователя — 1.", "default": 1, "min": 1, "max": 8},
+        {"key": "mtp", "type": "bool", "label": "MTP-декодер (спекулятивный)", "what": "Грузит отдельную голову MTP, которая предсказывает токены параллельно с основной моделью", "why": "Ускоряет генерацию в ~1.5–2 раза. На этой машине голова пока не загружается, поэтому по умолчанию выключено.", "default": false},
+        {"key": "mmproj", "type": "bool", "label": "Проектор изображений", "what": "Грузит mmproj — компонент мультимодальности (картинки)", "why": "Нужен, чтобы модель понимала изображения. Если картинки не нужны — отключите, экономит немного памяти.", "default": true},
+        {"key": "extra_args", "type": "str", "split": true, "label": "Доп. аргументы", "what": "Произвольные флаги llama-server, как в командной строке", "why": "Для редких параметров, не покрытых формой (например, -ot «tensor=CPU», --n-cpu-moe).", "default": ""}
+      ]
+    },
+    {
+      "id": "lucebox",
+      "name": "Lucebox (DeepSeek V4)",
+      "description": "Отдельный C++ движок для артефактов DeepSeek V4 в нестандартных квантах ROCmFPX/ROCmFP2/3 (llama.cpp их не читает). Цель сборки — luce_server.",
+      "provider": "lucebox",
+      "binaries": ["luce_server"],
+      "search_paths": ["~/lucebox/server/build-hip", "~/lucebox/server/build"],
+      "formats": ["gguf"],
+      "arch": ["deepseek4", "deepseek4-dflash-draft"],
+      "note_arch": "Только семейство deepseek4. Обычные GGUF (qwen*, llama*, …) не поддерживает.",
+      "health": "/health",
+      "models_route": "/v1/models",
+      "port_default": 8081,
+      "env": {"LUCE_MODEL_CARDS_DIR": "/mnt/models/tools/model_cards"},
+      "argv_template": [
+        "{binary}", "{model}",
+        "--target-device", "{target}",
+        "--port", "{port}",
+        "--max-ctx", "{context}",
+        "--profile", "{profile}",
+        "{draft_args}", "{extra_args}"
+      ],
+      "settings": [
+        {"key": "target", "type": "str", "label": "Устройство", "what": "Акселератор, на котором выполнять инференс", "why": "hip:0 — iGPU Strix Halo через ROCm. Не менять без причины.", "default": "hip:0"},
+        {"key": "port", "type": "int", "label": "Порт", "what": "TCP-порт OpenAI-совместимого API", "why": "У Qwen — 8080, у DeepSeek — 8081 намеренно, чтобы клиент не мог молча попасть в другую модель.", "default": 8081, "min": 1, "max": 65535},
+        {"key": "context", "type": "int", "label": "Контекст (токенов)", "what": "Длина окна контекста (--max-ctx)", "why": "Профиль ds4-strix ставит 131072. Уменьшать стоит только при нехватке памяти.", "default": 131072, "min": 8192, "max": 262144, "step": 4096},
+        {"key": "profile", "type": "str", "label": "Профиль запуска", "what": "Именованный набор флагов движка", "why": "ds4-strix = отлаженный под это железо профиль (fused decode, sparse prefill, expert-top-k 6). Не менять без необходимости.", "default": "ds4-strix"},
+        {"key": "draft", "type": "bool", "label": "DSpark-драфтер", "what": "Грузит отдельную модель-черновик для спекулятивного декода", "why": "Даёт ~1.8x к скорости генерации. Если файл черновика отсутствует — запустится без него.", "default": true},
+        {"key": "extra_args", "type": "str", "split": true, "label": "Доп. аргументы", "what": "Произвольные флаги luce_server", "why": "Для редких параметров, не покрытых формой.", "default": ""}
+      ]
+    },
+    {
+      "id": "ollama",
+      "name": "Ollama",
+      "description": "Go-демон поверх llama.cpp с реестром моделей и OpenAI-совместимым API на localhost:11434. На этой машине НЕ установлен.",
+      "binaries": ["ollama"],
+      "formats": ["gguf"],
+      "wired": false,
+      "health": "/api/tags",
+      "port_default": 11434
+    },
+    {
+      "id": "vllm",
+      "name": "vLLM",
+      "description": "Высокопроизводительный сервер (PagedAttention) для safetensors/GPTQ/AWQ; на этой машине нет (нужен CUDA/ROCm-стек + Python-окружение).",
+      "binaries": ["vllm"],
+      "formats": ["safetensors", "gptq", "awq"],
+      "wired": false
+    },
+    {
+      "id": "lmstudio",
+      "name": "LM Studio",
+      "description": "Графическое приложение + headless-сервер lms. На этой машине НЕ установлен.",
+      "binaries": ["lmstudio", "lms"],
+      "formats": ["gguf", "mlx"],
+      "wired": false,
+      "port_default": 1234
+    },
+    {
+      "id": "koboldcpp",
+      "name": "KoboldCpp",
+      "description": "Форк llama.cpp с веб-UI и тройной совместимостью API (KoboldAI + OpenAI + Ollama). Не установлен.",
+      "binaries": ["koboldcpp", "koboldcpp.py"],
+      "formats": ["gguf"],
+      "wired": false
+    },
+    {
+      "id": "llamafile",
+      "name": "llamafile",
+      "description": "Один исполняемый файл: веса + llama.cpp (Cosmopolitan). Не установлен.",
+      "binaries": ["llamafile", "llamafiler"],
+      "formats": ["gguf"],
+      "wired": false
+    },
+    {
+      "id": "mlc_llm",
+      "name": "MLC-LLM",
+      "description": "Компилируемый инференс (MLCEngine) для разнообразного железа. Не установлен.",
+      "binaries": ["mlc_llm", "mlc_chat"],
+      "formats": ["mlc"],
+      "wired": false
+    },
+    {
+      "id": "sglang",
+      "name": "SGLang",
+      "description": "Продакшн-сервер с RadixAttention для агентных/RAG-нагрузок. Не установлен.",
+      "binaries": ["sglang"],
+      "formats": ["safetensors", "awq", "gptq"],
+      "wired": false
+    }
+  ]
+}

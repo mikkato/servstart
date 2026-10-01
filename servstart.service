@@ -1,0 +1,18 @@
+[Unit]
+Description=servstart - system tray service for local LLM backends and models
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+Type=simple
+Environment=GDK_BACKEND=x11
+ExecStart=/usr/bin/python3 %h/.local/lib/servstart/servstart.py
+# Модели (llama-server/luce_server) запускаются из апплета как дочерние процессы.
+# KillMode=process: рестарт/остановка апплета НЕ убивает их вместе с cgroup —
+# иначе systemctl restart servstart гасит работающую модель.
+KillMode=process
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=graphical-session.target
