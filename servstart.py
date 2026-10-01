@@ -136,7 +136,9 @@ class ServStart:
         self.indicator = None
         self.status_item = None
         self.mem_item = None
-        self.model_items = {}     # path -> Gtk.CheckMenuItem
+        self.settings_item = None   # пункт «Стартовая настройка…»
+        self.preflight_item = None  # пункт «Проверить готовность»
+        self.model_items = {}     # path -> Gtk.MenuItem (пункты моделей)
         self.backend_items = {}   # id -> Gtk.MenuItem (пункты бэкендов)
         self._widgets = {}
         self._log_state = {}      # logfile -> {pos, inode, partial} (инкрементальное чтение)
@@ -203,12 +205,14 @@ class ServStart:
 
         s_item = Gtk.MenuItem(label="Стартовая настройка…")
         s_item.connect("activate", lambda *a: self.show_settings())
+        self.settings_item = s_item
         menu.append(s_item)
         l_item = Gtk.MenuItem(label="Логи…")
         l_item.connect("activate", lambda *a: self.show_logs())
         menu.append(l_item)
         c_item = Gtk.MenuItem(label="Проверить готовность")
         c_item.connect("activate", lambda *a: self.show_preflight())
+        self.preflight_item = c_item
         menu.append(c_item)
         menu.append(Gtk.SeparatorMenuItem())
         stop_item = Gtk.MenuItem(label="Остановка сервиса")
@@ -316,12 +320,16 @@ class ServStart:
         for path, mi in self.model_items.items():
             name = self._name_of(path)
             mi.set_label(("✓ " if path in self.running else "") + name)
-        # пока модель работает/грузится/останавливается — выбор недоступен
+        # пока модель работает/грузится/останавливается — выбор и настройки недоступны
         busy = bool(self.running) or bool(self._starting) or bool(self._stopping)
         for mi in self.model_items.values():
             mi.set_sensitive(not busy)
         for bi in self.backend_items.values():
             bi.set_sensitive(not busy)
+        if self.settings_item:
+            self.settings_item.set_sensitive(not busy)
+        if self.preflight_item:
+            self.preflight_item.set_sensitive(not busy)
         self.indicator.set_title("servstart — " + status)
 
     # ------------------------------------------------------------- запуск/стоп
@@ -820,7 +828,7 @@ class ServStart:
         self._log_state[p] = {"pos": st.st_size, "inode": st.st_ino, "partial": ""}
         text = "\n".join(self._stamp(l, now) for l in lines)
         buf.set_text(text or "[%s] — сеанс начат, ждём события…" % now)
-        self._fit_log_width(text)
+        self._fit_window_width(self.win_logs, self.log_view, text)
         GLib.idle_add(self._scroll_log_to_end)
 
     def _append_log_lines(self, lines):
@@ -845,20 +853,21 @@ class ServStart:
             return
         self._append_log_lines(self._read_log_increment(p))
 
-    def _fit_log_width(self, text):
-        if not self.win_logs.get_visible():
+    def _fit_window_width(self, win, view, text, min_w=520):
+        """Расширить окно по ширине самой длинной строки (уместить без обрезки)."""
+        if not win.get_visible():
             return
         maxlen = max((len(l) for l in text.splitlines()), default=0)
-        layout = self.log_view.create_pango_layout("M" * min(maxlen, 500))
+        layout = view.create_pango_layout("M" * min(maxlen, 500))
         w, _ = layout.get_pixel_size()
         target = w + 80
         screen = Gdk.Screen.get_default()
         avail = screen.get_width() if screen else 1920
-        target = max(520, min(target, int(avail * 0.92)))
-        cur = self.win_logs.get_size()[0]
+        target = max(min_w, min(target, int(avail * 0.92)))
+        cur = win.get_size()[0]
         if abs(target - cur) > 10:
-            self.win_logs.resize(target, self.win_logs.get_size()[1])
-            self._place_top_right(self.win_logs)
+            win.resize(target, win.get_size()[1])
+            self._place_top_right(win)
 
     def _open_log_in_terminal(self, btn):
         p = self._current_log_path()
@@ -939,9 +948,10 @@ class ServStart:
                 for lvl, t in llm.preflight(b, m, self.cfg):
                     mark = {"ok": "✓", "warn": "!", "error": "✗"}[lvl]
                     lines.append("  %s %s" % (mark, t))
-        self.preflight_view.get_buffer().set_text(
-            "\n".join(lines) or "бэкенды не найдены")
+        text = "\n".join(lines) or "бэкенды не найдены"
+        self.preflight_view.get_buffer().set_text(text)
         self._present_window(self.win_preflight)
+        self._fit_window_width(self.win_preflight, self.preflight_view, text)
 
     # ------------------------------------------------------------- диалоги
     def _dialog(self, title, body):
